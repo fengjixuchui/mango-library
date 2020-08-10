@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <Psapi.h>
 #include <WtsApi32.h>
+#include <TlHelp32.h>
 
 #include "../../include/epic/shellcode.h"
 
@@ -11,45 +12,45 @@
 #include "../../include/misc/logger.h"
 
 
-namespace {
-	// iterate over every module in the process
-	template <typename Ptr, typename Callable>
-	void iterate_modules(const mango::Process& process, Callable&& callback) {
-		using namespace mango;
-
-		const auto peb = process.get_peb<Ptr>();
-
-		// PEB_LDR_DATA
-		const auto list_head = process.read<windows::PEB_LDR_DATA<Ptr>>(peb.Ldr).InMemoryOrderModuleList;
-		for (auto current = list_head.Flink; current && current != list_head.Blink;) {
-			// LDR_DATA_TABLE_ENTRY
-			const auto table_addr = current - offsetof(windows::LDR_DATA_TABLE_ENTRY<Ptr>, InMemoryOrderLinks);
-			if (!table_addr)
-				break;
-
-			const auto table_entry = process.read<windows::LDR_DATA_TABLE_ENTRY<Ptr>>(table_addr);
-
-			const auto name_addr{ uintptr_t(table_entry.FullDllName.Buffer) };
-			if (!name_addr)
-				break;
-
-			const auto name_size{ size_t(table_entry.FullDllName.Length) };
-
-			// read the dll name
-			const auto name_wstr{ std::make_unique<wchar_t[]>(name_size + 1) };
-			process.read(name_addr, name_wstr.get(), name_size);
-			name_wstr[name_size] = L'\0';
-
-			// call our callback
-			std::invoke(callback, wstr_to_str(name_wstr.get()), table_entry.DllBase);
-
-			// proceed to next entry
-			current = process.read<windows::LIST_ENTRY<Ptr>>(current).Flink;
-		}
-	}
-} // namespace
-
 namespace mango {
+	namespace impl {
+		// iterate over every module in the process
+		template <typename Ptr, typename Callable>
+		void iterate_modules(const Process& process, Callable&& callback) {
+			const auto peb = process.get_peb<Ptr>();
+
+			// PEB_LDR_DATA
+			const auto list_head = process.read<windows::PEB_LDR_DATA<Ptr>>(peb.Ldr).InMemoryOrderModuleList;
+			const auto list_head_addr = peb.Ldr + offsetof(windows::PEB_LDR_DATA<Ptr>, InMemoryOrderModuleList);
+
+			for (auto current = list_head.Flink; current && current != list_head_addr;) {
+				// LDR_DATA_TABLE_ENTRY
+				const auto table_addr = current - offsetof(windows::LDR_DATA_TABLE_ENTRY<Ptr>, InMemoryOrderLinks);
+				if (!table_addr)
+					break;
+
+				const auto table_entry = process.read<windows::LDR_DATA_TABLE_ENTRY<Ptr>>(table_addr);
+
+				const auto name_addr{ uintptr_t(table_entry.FullDllName.Buffer) };
+				if (!name_addr)
+					break;
+
+				const auto name_size{ size_t(table_entry.FullDllName.Length) };
+
+				// read the dll name
+				const auto name_wstr{ std::make_unique<wchar_t[]>(name_size + 1) };
+				process.read(name_addr, name_wstr.get(), name_size);
+				name_wstr[name_size] = L'\0';
+
+				// call our callback
+				std::invoke(callback, wstr_to_str(name_wstr.get()), table_entry.DllBase);
+
+				// proceed to next entry
+				current = process.read<windows::LIST_ENTRY<Ptr>>(current).Flink;
+			}
+		}
+	} // namespace impl
+
 	// SeDebugPrivilege
 	void Process::set_debug_privilege(const bool value) {
 		// get a process token handle
@@ -96,6 +97,16 @@ namespace mango {
 		return pids;
 	}
 
+	// throws if none or more than one pid found
+	uint32_t Process::get_pid_by_name(const std::string_view process_name) {
+		auto const pids = get_pids_by_name(process_name);
+		if (pids.empty())
+			throw std::exception("Failed to find process.");
+		if (pids.size() > 1)
+			throw std::exception("More than one process with matching name found.");
+		return pids.front();
+	}
+
 	// setup by pid
 	void Process::setup(const uint32_t pid, const SetupOptions& options) {
 		this->release();
@@ -135,16 +146,35 @@ namespace mango {
 
 	// clean up
 	void Process::release() noexcept {
-		if (!this->m_is_valid)
-			return;
-
 		// never throw in a destructor
-		try {
+		if (this->m_is_valid) try {
+			this->m_is_valid = false;
 			if (this->m_free_handle)
 				CloseHandle(this->m_handle);
 		} catch (...) {}
+	}
 
-		this->m_is_valid = false;
+	// get all running thread ids
+	Process::ProcessThreadIds Process::get_threadids() const {
+		// TODO: find a better alternative
+		const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		if (snapshot == INVALID_HANDLE_VALUE)
+			throw FailedToCreateThreadSnapshot(mango_format_w32status(GetLastError()));
+
+		// get the first thread
+		THREADENTRY32 entry{ .dwSize = sizeof(THREADENTRY32) };
+		if (!Thread32First(snapshot, &entry))
+			throw FailedToGetFirstThread(mango_format_w32status(GetLastError()));
+
+		ProcessThreadIds threads;
+
+		// iterate through the rest of the threads
+		do {
+			if (entry.th32OwnerProcessID == this->m_pid)
+				threads.push_back(entry.th32ThreadID);
+		} while (Thread32Next(snapshot, &entry));
+
+		return threads;
 	}
 
 	// get a loaded module, case-insensitive (passing "" for name returns the current process module)
@@ -183,7 +213,7 @@ namespace mango {
 		return 0;
 	}
 
-	// this uses the internal list of modules to find the function address (doesn't account for ApiSchema)
+	// this uses the internal list of modules to find the function address
 	uintptr_t Process::get_proc_addr(const std::string_view module_name, const std::string_view func_name) const {
 		const auto mod{ this->get_module(module_name) };
 		if (!mod)
@@ -292,7 +322,7 @@ namespace mango {
 	}
 
 	// get the handles that the process currently has open
-	Process::ProcessHandles Process::get_open_handles() const {
+	Process::ProcessHandles Process::get_open_handles(uint32_t const pid) {
 		unsigned long buffer_size{ 0xFFFF };
 		uint8_t* buffer{ new uint8_t[buffer_size] };
 
@@ -302,8 +332,7 @@ namespace mango {
 		// query system info
 		NTSTATUS status{ 0 };
 		while (0xC0000004 == (status = windows::NtQuerySystemInformation(
-			windows::SystemHandleInformation, buffer, buffer_size, nullptr))) 
-		{
+			windows::SystemHandleInformation, buffer, buffer_size, nullptr))) {
 			// STATUS_INFO_LENGTH_MISMATCH
 			// buffer too small, allocate larger
 			delete[] buffer; buffer = new uint8_t[buffer_size *= 2];
@@ -321,10 +350,10 @@ namespace mango {
 			const auto entry = handle_info->Handles[i];
 
 			// we only care about this process
-			if (entry.ProcessId != this->m_pid)
+			if (entry.ProcessId != pid)
 				continue;
 
-			handles.push_back({ HANDLE(entry.Handle), entry.ObjectTypeNumber, entry.GrantedAccess });
+			handles.push_back({ HANDLE(entry.Handle), entry.ObjectTypeNumber, entry.GrantedAccess, entry.ObjectAddress });
 		}
 
 		return handles;
@@ -400,9 +429,9 @@ namespace mango {
 		} };
 
 		if (this->is_64bit()) {
-			iterate_modules<uint64_t>(*this, callback);
+			impl::iterate_modules<uint64_t>(*this, callback);
 		} else {
-			iterate_modules<uint32_t>(*this, callback);
+			impl::iterate_modules<uint32_t>(*this, callback);
 		}
 	}
 

@@ -18,6 +18,7 @@ namespace mango {
 			HANDLE handle;
 			uint8_t type;
 			ACCESS_MASK access;
+			void* object;
 		};
 
 		using ReadMemoryFunc			= void (*)(const Process* process, const void* address, void* buffer, size_t size);
@@ -43,6 +44,7 @@ namespace mango {
 		};
 
 		// containers
+		using ProcessThreadIds = std::vector<uint32_t>;
 		using ProcessHandles = std::vector<HandleInfo>;
 		using ProcessModules = std::unordered_map<std::string, LoadedModule>;
 		using ModuleAddressMap = std::unordered_map<std::string, uintptr_t>;
@@ -56,8 +58,7 @@ namespace mango {
 			this->setup(handle, options);
 		}
 
-		// just calls release
-		~Process() noexcept { this->release(); }
+		~Process() { this->release(); }
 
 		// prevent copying (and moving cuz fuck you)
 		Process(const Process&) = delete;
@@ -73,6 +74,9 @@ namespace mango {
 
 		// get a list of pids that match the process name
 		static std::vector<uint32_t> get_pids_by_name(const std::string_view process_name);
+
+		// throws if none or more than one pid found
+		static uint32_t get_pid_by_name(const std::string_view process_name);
 
 		// setup by pid
 		void setup(const uint32_t pid, const SetupOptions& options = SetupOptions());
@@ -107,6 +111,9 @@ namespace mango {
 		// get the name of the process
 		std::string get_name() const noexcept { return this->m_process_name; }
 
+		// get all running thread ids
+		ProcessThreadIds get_threadids() const;
+
 		// get a list of loaded modules
 		const ProcessModules& get_modules() const noexcept { return this->m_modules; }
 
@@ -116,7 +123,7 @@ namespace mango {
 		// get the base address of a module
 		uintptr_t get_module_addr(const std::string_view module_name = "") const;
 
-		// this uses the internal list of modules to find the function address (doesn't account for ApiSchema)
+		// this uses the internal list of modules to find the function address
 		uintptr_t get_proc_addr(const std::string_view module_name, const std::string_view func_name) const;
 
 		// api name -> dll name
@@ -139,7 +146,7 @@ namespace mango {
 			} else {
 				if (this->is_64bit())
 					throw NotA32BitProcess{};
-				// wow64 peb is +one page from the 64bit peb
+				// wow64 peb is +1 page from the 64bit peb
 				return this->m_peb64_address + 0x1000;
 			}
 		}
@@ -215,7 +222,8 @@ namespace mango {
 		void resume() const;
 
 		// get the handles that the process currently has open
-		ProcessHandles get_open_handles() const;
+		ProcessHandles get_open_handles() const { return this->get_open_handles(this->m_pid); }
+		static ProcessHandles get_open_handles(uint32_t const pid);
 
 		// updates the internal list of modules
 		void load_modules();

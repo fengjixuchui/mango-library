@@ -2,9 +2,25 @@
 
 #include <misc/logger.h>
 #include <epic/process.h>
+#include <epic/thread.h>
+#include <epic/hardware_breakpoint.h>
+#include <epic/loader.h>
+#include <epic/driver.h>
+#include <epic/syscall.h>
 
 #include <epic/memory_scanner.h>
 #include <epic/shellcode.h>
+
+#include <misc/fnv_hash.h>
+#include <misc/vector.h>
+#include <misc/scope_guard.h>
+
+#include <chrono>
+#include <filesystem>
+
+
+// TODO: use only one template thing for cross-architecture stuff: eg is64bit or Ptr
+// TODO: add function to get parent process id in mango::Process class
 
 
 int main() {
@@ -15,14 +31,8 @@ int main() {
     try {
         using namespace mango;
 
-        const auto process(Process::current());
-        logger.success("Attached to process!");
 
-        static constexpr auto bytes = shw::absjmp<false>(0x69);
-        for (const auto result : memscn::find(process, { bytes.data(), bytes.size() }, memscn::range_all, memscn::code_filter)) {
-            logger.success("0x", std::hex, std::uppercase, result);
-        }
-    } catch (const std::exception & e) {
+    } catch (const std::exception& e) {
         mango::logger.error(e.what());
     }
 

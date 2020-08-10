@@ -63,6 +63,9 @@
     <ClCompile Include="src\epic\syscall.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\epic\thread.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\epic\shellcode.h">
@@ -155,9 +158,12 @@
     <ClInclude Include="include\epic\syscall.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\epic\thread.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <MASM Include="asm\syscall-x64.asm">
+    <MASM Include="src\asm\syscall-x64.asm">
       <Filter>Source Files</Filter>
     </MASM>
   </ItemGroup>
